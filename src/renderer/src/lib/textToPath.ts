@@ -7,38 +7,33 @@ export interface TextPathResult {
 }
 
 /**
- * 变换 Path 的 commands：Y轴翻转 + 平移。
- * opentype.js 字体坐标系 Y 轴向上，SVG/屏幕坐标系 Y 轴向下，需翻转。
+ * 将 opentype.js Path 的 commands 直接序列化为 SVG path data。
+ * 不使用 toPathData()，因为它会做额外的 Y 轴反射导致文字颠倒。
+ * commands 中的坐标已经是 Y-down（SVG 兼容）的，只需平移归一化。
  */
-function transformPath(p: any, flipY: boolean, dx: number, dy: number): string {
+function commandsToPathData(p: any, dx: number, dy: number): string {
   const cmds = p.commands
+  const parts: string[] = []
   for (const c of cmds) {
-    if (c.type === 'M' || c.type === 'L' || c.type === 'T') {
-      if (flipY) c.y = -c.y
-      c.x += dx
-      c.y += dy
+    if (c.type === 'M') {
+      parts.push(`M${(c.x + dx).toFixed(2)} ${(c.y + dy).toFixed(2)}`)
+    } else if (c.type === 'L') {
+      parts.push(`L${(c.x + dx).toFixed(2)} ${(c.y + dy).toFixed(2)}`)
     } else if (c.type === 'C') {
-      if (flipY) { c.y = -c.y; c.y1 = -c.y1; c.y2 = -c.y2 }
-      c.x += dx; c.y += dy
-      c.x1 += dx; c.y1 += dy
-      c.x2 += dx; c.y2 += dy
+      parts.push(`C${(c.x1 + dx).toFixed(2)} ${(c.y1 + dy).toFixed(2)} ${(c.x2 + dx).toFixed(2)} ${(c.y2 + dy).toFixed(2)} ${(c.x + dx).toFixed(2)} ${(c.y + dy).toFixed(2)}`)
     } else if (c.type === 'Q') {
-      if (flipY) { c.y = -c.y; c.y1 = -c.y1 }
-      c.x += dx; c.y += dy
-      c.x1 += dx; c.y1 += dy
-    } else if (c.type === 'S') {
-      if (flipY) { c.y = -c.y; c.y2 = -c.y2 }
-      c.x += dx; c.y += dy
-      c.x2 += dx; c.y2 += dy
+      parts.push(`Q${(c.x1 + dx).toFixed(2)} ${(c.y1 + dy).toFixed(2)} ${(c.x + dx).toFixed(2)} ${(c.y + dy).toFixed(2)}`)
+    } else if (c.type === 'Z') {
+      parts.push('Z')
     }
-    // Z 不需要变换
   }
-  return p.toPathData()
+  return parts.join('')
 }
 
 /**
  * 将文字转为字形轮廓路径（空心字）。
- * 坐标系已归一化：路径包围盒左上角对齐到 (0,0)，Y 轴向下（SVG 标准）。
+ * 坐标系已归一化：路径包围盒左上角对齐到 (0,0)。
+ * opentype.js getPath 返回的 commands 已是 Y-down 坐标，直接平移即可。
  */
 export function textToPath(
   text: string,
@@ -54,9 +49,9 @@ export function textToPath(
   let x = 0
   let y = 0
   let minX = Infinity
-  let minY = Infinity  // 字体坐标系（Y向上）的 minY
+  let minY = Infinity
   let maxX = -Infinity
-  let maxY = -Infinity  // 字体坐标系（Y向上）的 maxY
+  let maxY = -Infinity
 
   const lines = text.split(/\r?\n/)
   for (const line of lines) {
@@ -66,9 +61,7 @@ export function textToPath(
       const gp = glyph.getPath(x, y, fontSize)
       collected.push(gp)
       const bb = gp.getBoundingBox()
-      if (!isFinite(bb.x1)) {
-        // 空格等无轮廓字符
-      } else {
+      if (isFinite(bb.x1)) {
         minX = Math.min(minX, bb.x1)
         minY = Math.min(minY, bb.y1)
         maxX = Math.max(maxX, bb.x2)
@@ -83,11 +76,11 @@ export function textToPath(
     return { paths: [], width: x || fontSize, height: lineH }
   }
 
-  // Y 轴翻转后：新的 minY = -maxY, 新的 maxY = -minY
-  // 平移使左上角对齐到 (0,0)：dx = -minX, dy = -(-maxY) = maxY
+  // 平移使包围盒左上角对齐到 (0,0)
+  // commands 已是 Y-down，minY 是最上方（最负的 Y），maxY 是最下方
   const dx = -minX
-  const dy = maxY  // 翻转后平移量
-  const dStrings = collected.map((p) => transformPath(p, true, dx, dy))
+  const dy = -minY
+  const dStrings = collected.map((p) => commandsToPathData(p, dx, dy))
 
   return {
     paths: dStrings,
@@ -98,10 +91,6 @@ export function textToPath(
 
 // ========== 非空心字（笔画骨架化）==========
 
-/**
- * 将文字渲染到 Canvas 并提取骨架（细化）路径。
- * 使用 Zhang-Suen 细化算法对填充字形做骨架化，得到近似笔画中心线。
- */
 export function textToSkeletonPaths(
   text: string,
   font: any,
@@ -111,48 +100,64 @@ export function textToSkeletonPaths(
 ): TextPathResult {
   if (!text) return { paths: [], width: 0, height: 0 }
 
-  // 1. 用 opentype.js 获取文字尺寸
   const outlineResult = textToPath(text, font, fontSize, letterSpacing, lineHeight)
-  const w = Math.ceil(outlineResult.width) + 4
-  const h = Math.ceil(outlineResult.height) + 4
+  const SUPER = 3 // 超采样倍数，越高骨架越平滑
+  const padding = 4 * SUPER
+  const w = (Math.ceil(outlineResult.width) + 4 * 2) * SUPER
+  const h = (Math.ceil(outlineResult.height) + 4 * 2) * SUPER
   if (w <= 0 || h <= 0) return { paths: [], width: 0, height: 0 }
 
-  // 2. 创建 Canvas，用 opentype.js 的 Path 对象绘制填充字形
+  // 1. 用 opentype.js 的 font.draw 渲染填充文字到 Canvas（超采样分辨率）
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d')!
   ctx.fillStyle = '#000'
   ctx.clearRect(0, 0, w, h)
+  font.draw(ctx, text, padding, padding + fontSize * SUPER * 0.8, fontSize * SUPER, { letterSpacing, lineHeight })
 
-  // 用 opentype.js 的 font.draw 渲染填充文字
-  // draw(ctx, text, x, y, fontSize, options)
-  font.draw(ctx, text, 2, h - 2, fontSize, { letterSpacing, lineHeight })
-
-  // 3. 提取像素，做二值化
+  // 2. 提取像素二值化
   const imgData = ctx.getImageData(0, 0, w, h)
   const binary: Uint8Array = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) {
-    binary[i] = imgData.data[i * 4 + 3] > 128 ? 1 : 0  // 用 alpha 通道
+    binary[i] = imgData.data[i * 4 + 3] > 128 ? 1 : 0
   }
 
-  // 4. Zhang-Suen 细化算法
+  // 3. Zhang-Suen 细化
   const skeleton = zhangSuenThin(binary, w, h)
 
-  // 5. 将骨架像素追踪为路径
-  const paths = traceSkeleton(skeleton, w, h)
+  // 4. 追踪骨架为路径（在高分辨率空间）
+  const rawPaths = traceSkeleton(skeleton, w, h, padding)
+
+  // 5. 将路径从超采样空间缩放回原始空间
+  const scaledPaths = rawPaths.map((d) => {
+    const pts = parsePathPoints(d)
+    return pts.map((p) => [p[0] / SUPER, p[1] / SUPER] as [number, number])
+  })
+
+  // 6. 合并短碎片、简化路径、平滑
+  const mergedPaths = mergeSimplifySmooth(scaledPaths)
 
   return {
-    paths,
+    paths: mergedPaths,
     width: outlineResult.width,
     height: outlineResult.height
   }
 }
 
-/**
- * Zhang-Suen 细化算法。
- * 输入：二值图（1=前景，0=背景），输出：细化后的二值图。
- */
+/** 从 SVG path data 字符串中解析出点列表 */
+function parsePathPoints(d: string): [number, number][] {
+  const pts: [number, number][] = []
+  const matches = d.match(/[ML]\s*([\d.-]+)\s+([\d.-]+)/g)
+  if (matches) {
+    for (const m of matches) {
+      const parts = m.match(/([\d.-]+)\s+([\d.-]+)/)!
+      pts.push([parseFloat(parts[1]), parseFloat(parts[2])])
+    }
+  }
+  return pts
+}
+
 function zhangSuenThin(binary: Uint8Array, w: number, h: number): Uint8Array {
   let img = new Uint8Array(binary)
   let changed = true
@@ -160,98 +165,58 @@ function zhangSuenThin(binary: Uint8Array, w: number, h: number): Uint8Array {
   while (changed) {
     changed = false
 
-    // Sub-iteration 1
-    const toRemove1: number[] = []
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const idx = y * w + x
-        if (img[idx] !== 1) continue
+    for (const subIter of [1, 2]) {
+      const toRemove: number[] = []
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const idx = y * w + x
+          if (img[idx] !== 1) continue
 
-        const p2 = img[(y - 1) * w + x]
-        const p3 = img[(y - 1) * w + x + 1]
-        const p4 = img[y * w + x + 1]
-        const p5 = img[(y + 1) * w + x + 1]
-        const p6 = img[(y + 1) * w + x]
-        const p7 = img[(y + 1) * w + x - 1]
-        const p8 = img[y * w + x - 1]
-        const p9 = img[(y - 1) * w + x - 1]
+          const p2 = img[(y - 1) * w + x]
+          const p3 = img[(y - 1) * w + x + 1]
+          const p4 = img[y * w + x + 1]
+          const p5 = img[(y + 1) * w + x + 1]
+          const p6 = img[(y + 1) * w + x]
+          const p7 = img[(y + 1) * w + x - 1]
+          const p8 = img[y * w + x - 1]
+          const p9 = img[(y - 1) * w + x - 1]
 
-        const neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
-        const bp = neighbors.reduce((a, b) => a + b, 0)
-        if (bp < 2 || bp > 6) continue
+          const neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
+          const bp = neighbors.reduce((a, b) => a + b, 0)
+          if (bp < 2 || bp > 6) continue
 
-        // 转变次数 A(P1)
-        const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
-        let ap = 0
-        for (let i = 0; i < 8; i++) {
-          if (seq[i] === 0 && seq[i + 1] === 1) ap++
+          const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+          let ap = 0
+          for (let i = 0; i < 8; i++) {
+            if (seq[i] === 0 && seq[i + 1] === 1) ap++
+          }
+          if (ap !== 1) continue
+
+          if (subIter === 1) {
+            if (p2 * p4 * p6 !== 0) continue
+            if (p4 * p6 * p8 !== 0) continue
+          } else {
+            if (p2 * p4 * p8 !== 0) continue
+            if (p2 * p6 * p8 !== 0) continue
+          }
+
+          toRemove.push(idx)
         }
-        if (ap !== 1) continue
-
-        // Sub-iteration 1 条件
-        if (p2 * p4 * p6 !== 0) continue
-        if (p4 * p6 * p8 !== 0) continue
-
-        toRemove1.push(idx)
       }
-    }
-    for (const idx of toRemove1) {
-      img[idx] = 0
-      changed = true
-    }
-
-    // Sub-iteration 2
-    const toRemove2: number[] = []
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const idx = y * w + x
-        if (img[idx] !== 1) continue
-
-        const p2 = img[(y - 1) * w + x]
-        const p3 = img[(y - 1) * w + x + 1]
-        const p4 = img[y * w + x + 1]
-        const p5 = img[(y + 1) * w + x + 1]
-        const p6 = img[(y + 1) * w + x]
-        const p7 = img[(y + 1) * w + x - 1]
-        const p8 = img[y * w + x - 1]
-        const p9 = img[(y - 1) * w + x - 1]
-
-        const neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
-        const bp = neighbors.reduce((a, b) => a + b, 0)
-        if (bp < 2 || bp > 6) continue
-
-        const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
-        let ap = 0
-        for (let i = 0; i < 8; i++) {
-          if (seq[i] === 0 && seq[i + 1] === 1) ap++
-        }
-        if (ap !== 1) continue
-
-        // Sub-iteration 2 条件
-        if (p2 * p4 * p8 !== 0) continue
-        if (p2 * p6 * p8 !== 0) continue
-
-        toRemove2.push(idx)
+      for (const idx of toRemove) {
+        img[idx] = 0
+        changed = true
       }
-    }
-    for (const idx of toRemove2) {
-      img[idx] = 0
-      changed = true
     }
   }
 
   return img
 }
 
-/**
- * 将骨架像素追踪为 SVG path 字符串数组。
- * 策略：从端点或交叉点开始，沿骨架追踪连续路径。
- */
-function traceSkeleton(skeleton: Uint8Array, w: number, h: number): string[] {
+function traceSkeleton(skeleton: Uint8Array, w: number, h: number, padding: number): string[] {
   const visited = new Uint8Array(w * h)
-  const paths: string[] = []
+  const paths: [number, number][][] = []
 
-  // 找到所有前景像素的邻居数
   function neighborCount(x: number, y: number): number {
     let count = 0
     for (let dy = -1; dy <= 1; dy++) {
@@ -265,47 +230,53 @@ function traceSkeleton(skeleton: Uint8Array, w: number, h: number): string[] {
     return count
   }
 
-  // 从起点开始追踪路径
-  function tracePath(startX: number, startY: number): { points: [number, number][] } {
+  function tracePath(startX: number, startY: number): [number, number][] {
     const points: [number, number][] = [[startX, startY]]
     visited[startY * w + startX] = 1
     let cx = startX, cy = startY
-    let prevX = -1, prevY = -1
+    let lastDir = 0
+
+    const dirs = [
+      [0, -1], [1, -1], [1, 0], [1, 1],
+      [0, 1], [-1, 1], [-1, 0], [-1, -1]
+    ]
 
     while (true) {
-      let nextX = -1, nextY = -1
-      let found = false
+      const orderedDirs: [number, number][] = []
+      for (let i = 0; i < 8; i++) {
+        const idx = (lastDir + i) % 8
+        orderedDirs.push(dirs[idx])
+      }
 
-      // 优先搜索 8 邻域
-      for (let dy = -1; dy <= 1 && !found; dy++) {
-        for (let dx = -1; dx <= 1 && !found; dx++) {
-          if (dx === 0 && dy === 0) continue
-          const nx = cx + dx, ny = cy + dy
-          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
-          if (nx === prevX && ny === prevY) continue
-          const idx = ny * w + nx
-          if (skeleton[idx] === 1 && visited[idx] === 0) {
-            nextX = nx
-            nextY = ny
-            found = true
-          }
+      let found = false
+      for (const [dx, dy] of orderedDirs) {
+        const nx = cx + dx, ny = cy + dy
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+        const idx = ny * w + nx
+        if (skeleton[idx] === 1 && visited[idx] === 0) {
+          if (dx === 0 && dy === -1) lastDir = 0
+          else if (dx === 1 && dy === -1) lastDir = 1
+          else if (dx === 1 && dy === 0) lastDir = 2
+          else if (dx === 1 && dy === 1) lastDir = 3
+          else if (dx === 0 && dy === 1) lastDir = 4
+          else if (dx === -1 && dy === 1) lastDir = 5
+          else if (dx === -1 && dy === 0) lastDir = 6
+          else if (dx === -1 && dy === -1) lastDir = 7
+          cx = nx
+          cy = ny
+          visited[cy * w + cx] = 1
+          points.push([cx, cy])
+          found = true
+          break
         }
       }
 
       if (!found) break
-
-      prevX = cx
-      prevY = cy
-      cx = nextX
-      cy = nextY
-      visited[cy * w + cx] = 1
-      points.push([cx, cy])
     }
 
-    return { points }
+    return points
   }
 
-  // 找端点（邻居数=1）或交叉点（邻居数>2）开始追踪
   const startPoints: [number, number][] = []
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -318,30 +289,126 @@ function traceSkeleton(skeleton: Uint8Array, w: number, h: number): string[] {
     }
   }
 
-  // 从端点/交叉点开始追踪
   for (const [sx, sy] of startPoints) {
     if (visited[sy * w + sx] === 1) continue
-    const { points } = tracePath(sx, sy)
-    if (points.length >= 2) {
-      const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ')
-      paths.push(d)
-    }
+    const points = tracePath(sx, sy)
+    if (points.length >= 2) paths.push(points)
   }
 
-  // 追踪剩余的未访问像素（环状路径）
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       if (skeleton[y * w + x] === 1 && visited[y * w + x] === 0) {
-        const { points } = tracePath(x, y)
-        if (points.length >= 2) {
-          const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ')
-          paths.push(d)
+        const points = tracePath(x, y)
+        if (points.length >= 2) paths.push(points)
+      }
+    }
+  }
+
+  return paths.map((pts) => {
+    return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${(p[0] - padding).toFixed(1)} ${(p[1] - padding).toFixed(1)}`).join(' ')
+  })
+}
+
+function mergeSimplifySmooth(paths: [number, number][][], mergeDist = 5): string[] {
+  if (paths.length === 0) return []
+
+  // 1. 合并近距离的路径片段
+  let allPoints = paths.map((p) => [...p])
+  let merged = true
+  while (merged) {
+    merged = false
+    for (let i = 0; i < allPoints.length; i++) {
+      for (let j = 0; j < allPoints.length; j++) {
+        if (i === j) continue
+        const a = allPoints[i]
+        const b = allPoints[j]
+        if (a.length === 0 || b.length === 0) continue
+
+        const endA = a[a.length - 1]
+        const startB = b[0]
+        const dist = Math.hypot(endA[0] - startB[0], endA[1] - startB[1])
+
+        if (dist < mergeDist) {
+          allPoints[i] = a.concat(b.slice(1))
+          allPoints[j] = []
+          merged = true
         }
       }
     }
   }
 
-  return paths
+  // 2. 简化 + 平滑
+  const result: string[] = []
+  for (const pts of allPoints) {
+    if (pts.length < 2) continue
+    const simplified = douglasPeucker(pts, 2.0)
+    if (simplified.length < 2) continue
+    const smoothed = movingAverage(smoothed2(simplified), 3)
+    if (smoothed.length < 2) continue
+    const d = smoothed.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ')
+    result.push(d)
+  }
+
+  return result
+}
+
+/** 移动平均平滑 */
+function movingAverage(points: [number, number][], radius: number): [number, number][] {
+  if (points.length <= 2 || radius <= 0) return points
+  const result: [number, number][] = []
+  for (let i = 0; i < points.length; i++) {
+    let sx = 0, sy = 0, count = 0
+    for (let j = Math.max(0, i - radius); j <= Math.min(points.length - 1, i + radius); j++) {
+      sx += points[j][0]
+      sy += points[j][1]
+      count++
+    }
+    result.push([sx / count, sy / count])
+  }
+  // 保持首尾点不变，避免端点偏移
+  result[0] = [points[0][0], points[0][1]]
+  result[result.length - 1] = [points[points.length - 1][0], points[points.length - 1][1]]
+  return result
+}
+
+/** 二次平滑（先简化再平滑的中间步骤别名，保持代码清晰） */
+function smoothed2(points: [number, number][]): [number, number][] {
+  return points
+}
+
+function douglasPeucker(points: [number, number][], tolerance: number): [number, number][] {
+  if (points.length < 3) return points
+
+  let maxDist = 0
+  let maxIdx = 0
+  const first = points[0]
+  const last = points[points.length - 1]
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const dist = pointToLineDistance(points[i], first, last)
+    if (dist > maxDist) {
+      maxDist = dist
+      maxIdx = i
+    }
+  }
+
+  if (maxDist > tolerance) {
+    const left = douglasPeucker(points.slice(0, maxIdx + 1), tolerance)
+    const right = douglasPeucker(points.slice(maxIdx), tolerance)
+    return left.slice(0, -1).concat(right)
+  } else {
+    return [first, last]
+  }
+}
+
+function pointToLineDistance(p: [number, number], a: [number, number], b: [number, number]): number {
+  const dx = b[0] - a[0]
+  const dy = b[1] - a[1]
+  if (dx === 0 && dy === 0) return Math.hypot(p[0] - a[0], p[1] - a[1])
+  const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)
+  const projX = a[0] + t * dx
+  const projY = a[1] + t * dy
+  return Math.hypot(p[0] - projX, p[1] - projY)
 }
 
 export function parseFont(buffer: ArrayBuffer): any {

@@ -21,7 +21,18 @@ class MouseControl {
     mouse.config.mouseSpeed = options.mouseSpeed
     mouse.config.autoDelayMs = 0
 
-    if (options.startDelayMs > 0) await sleep(options.startDelayMs)
+    // 安全回退值，防止 IPC 传参缺失
+    const moveSettleMs = options.moveSettleMs ?? 5
+    const pressSettleMs = options.pressSettleMs ?? 5
+    const stepDelayMs = options.stepDelayMs ?? 3
+    const strokeDelayMs = options.strokeDelayMs ?? 40
+    const startDelayMs = options.startDelayMs ?? 500
+    const mouseSpeed = options.mouseSpeed ?? 2000
+
+    console.log('[mouse] options:', JSON.stringify({ moveSettleMs, pressSettleMs, stepDelayMs, strokeDelayMs, startDelayMs, mouseSpeed }))
+    console.log('[mouse] total strokes:', strokes.length, 'scaleFactor:', scaleFactor)
+
+    if (startDelayMs > 0) await sleep(startDelayMs)
 
     const total = strokes.length
     for (let i = 0; i < total; i++) {
@@ -32,32 +43,47 @@ class MouseControl {
         continue
       }
 
+      // 强制释放鼠标左键，确保处于已释放状态
+      await mouse.releaseButton(Button.LEFT)
+      await sleep(5)
+
       // 移动到起点（不按笔）
       const first = s.points[0]
-      await mouse.setPosition(this.toScreen(first, region, scaleFactor))
-      // 等待鼠标定位完成，避免紧接着的 pressButton 事件丢失
-      await sleep(Math.max(options.stepDelayMs, 5))
+      const startPos = this.toScreen(first, region, scaleFactor)
+      await mouse.setPosition(startPos)
+      // 等待目标软件反应过来光标已到位
+      await sleep(Math.max(moveSettleMs, 10))
 
-      // 按下左键，并等待事件被系统处理
+      // 按下左键，等待目标软件处理按键事件后再开始移动
       await mouse.pressButton(Button.LEFT)
-      await sleep(10) // 确保 pressButton 事件被 OS 处理
+      await sleep(Math.max(pressSettleMs, 15))
+
+      console.log(`[mouse] stroke ${i + 1}/${total}: start=(${startPos.x},${startPos.y}) points=${s.points.length}`)
 
       // 沿路径移动
+      let prevPos = startPos
       for (let j = 1; j < s.points.length; j++) {
         if (this.cancelled) {
           await mouse.releaseButton(Button.LEFT)
           return { ok: false, error: 'cancelled' }
         }
-        await mouse.setPosition(this.toScreen(s.points[j], region, scaleFactor))
-        if (options.stepDelayMs > 0) await sleep(options.stepDelayMs)
+        const currPos = this.toScreen(s.points[j], region, scaleFactor)
+        await mouse.setPosition(currPos)
+        // 用 mouseSpeed 计算步进延迟：距离/速度*1000ms
+        const dist = Math.hypot(currPos.x - prevPos.x, currPos.y - prevPos.y)
+        const speedDelay = mouseSpeed > 0 ? Math.round(dist / mouseSpeed * 1000) : 0
+        const delay = Math.max(stepDelayMs, speedDelay, 1)
+        await sleep(delay)
+        prevPos = currPos
       }
 
-      // 松开左键，并等待事件被系统处理
+      // 松开左键
       await mouse.releaseButton(Button.LEFT)
-      await sleep(5) // 确保 releaseButton 事件被处理后再移到下一笔
+      // 等待松键事件被处理后再移到下一笔
+      await sleep(Math.max(moveSettleMs, 10))
 
       onProgress({ current: i + 1, total })
-      if (i < total - 1 && options.strokeDelayMs > 0) await sleep(options.strokeDelayMs)
+      if (i < total - 1 && strokeDelayMs > 0) await sleep(strokeDelayMs)
     }
 
     return { ok: true }

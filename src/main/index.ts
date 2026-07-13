@@ -50,9 +50,20 @@ app.whenReady().then(() => {
 
   ipcMain.handle('execute:run', async (_e, strokes, region, options) => {
     const sf = screen.getPrimaryDisplay().scaleFactor
-    return await mouseControl.run(strokes, region, options, sf, (p) => {
-      win?.webContents.send('execute:progress', p)
+    // 绘制期间注册全局 ESC 快捷键（窗口失焦时也能收到）
+    const escAccel = 'Escape'
+    globalShortcut.register(escAccel, () => {
+      console.log('[main] ESC pressed, cancelling execution')
+      mouseControl.cancel()
     })
+    try {
+      return await mouseControl.run(strokes, region, options, sf, (p) => {
+        win?.webContents.send('execute:progress', p)
+      })
+    } finally {
+      // 绘制结束后注销 ESC 快捷键
+      globalShortcut.unregister(escAccel)
+    }
   })
 
   ipcMain.handle('execute:cancel', async () => {

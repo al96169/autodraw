@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { reactive, ref, computed } from 'vue'
+import { reactive, ref, computed, markRaw } from 'vue'
 import { parseFont, textToPath, textToSkeletonPaths } from '../lib/textToPath'
+import { preloadHanzi, buildHanziTextPaths } from '../lib/hanziStrokes'
 import type { Region, Stroke, ExecuteOptions } from '../../../shared/types'
 import type { Shape, TextShape, SvgShape } from '../types'
 import { svgToPath } from '../lib/svgToPath'
@@ -35,8 +36,10 @@ export const useCanvasStore = defineStore('canvas', () => {
   const executeOptions = reactive<ExecuteOptions>({
     stepDelayMs: 3,
     strokeDelayMs: 40,
-    startDelayMs: 3000,
-    mouseSpeed: 2000
+    startDelayMs: 500,
+    mouseSpeed: 2000,
+    moveSettleMs: 5,
+    pressSettleMs: 5
   })
   const sampleStep = ref(2)
 
@@ -114,12 +117,36 @@ export const useCanvasStore = defineStore('canvas', () => {
   function recomputeText(s: TextShape) {
     if (!font.value) return
     const mode = s.textMode || 'outline'
-    const r = mode === 'skeleton'
-      ? textToSkeletonPaths(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
-      : textToPath(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
-    s.paths = r.paths
-    s.localWidth = r.width
-    s.localHeight = r.height
+    if (mode === 'skeleton') {
+      // 骨架模式：先尝试 hanzi 笔画数据，若未缓存则回退到像素骨架
+      const hanziResult = buildHanziTextPaths(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
+      if (hanziResult.paths.length > 0) {
+        s.paths = markRaw(hanziResult.paths)
+        s.localWidth = hanziResult.width
+        s.localHeight = hanziResult.height
+        return
+      }
+      // hanzi 数据未加载，回退到像素骨架，并异步预加载
+      const r = textToSkeletonPaths(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
+      s.paths = markRaw(r.paths)
+      s.localWidth = r.width
+      s.localHeight = r.height
+      // 异步预加载 hanzi 数据，加载完成后重新计算
+      preloadHanzi(s.text).then(() => {
+        const hr = buildHanziTextPaths(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
+        if (hr.paths.length > 0) {
+          s.paths = markRaw(hr.paths)
+          s.localWidth = hr.width
+          s.localHeight = hr.height
+          console.log('[store] hanzi data loaded, recomputed skeleton for:', s.text)
+        }
+      })
+    } else {
+      const r = textToPath(s.text, font.value, s.fontSize, s.letterSpacing, s.lineHeight)
+      s.paths = markRaw(r.paths)
+      s.localWidth = r.width
+      s.localHeight = r.height
+    }
   }
 
   function addText(text = '文字') {
@@ -142,7 +169,7 @@ export const useCanvasStore = defineStore('canvas', () => {
         y: Math.max(0, (ch - r.height) / 2),
         scaleX: 1,
         scaleY: 1,
-        paths: r.paths,
+        paths: markRaw(r.paths),
         localWidth: r.width,
         localHeight: r.height,
         name: '文字',
@@ -178,7 +205,7 @@ export const useCanvasStore = defineStore('canvas', () => {
         y: (ch - r.height * fitScale) / 2,
         scaleX: fitScale,
         scaleY: fitScale,
-        paths: r.paths,
+        paths: markRaw(r.paths),
         localWidth: r.width,
         localHeight: r.height,
         name,

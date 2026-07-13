@@ -114,31 +114,103 @@ function translatePath(d: string, dx: number, dy: number): string {
   return result
 }
 
-/** 计算一组 d 字符串的并集包围盒（通过离屏 svg） */
+/** 从 path d 字符串中提取所有坐标点（纯数学，不依赖 DOM） */
+function parsePathCoords(d: string): number[][] {
+  const points: number[][] = []
+  const tokens = d.match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g)
+  if (!tokens) return points
+
+  let cx = 0, cy = 0
+  let cmd = '', cmdUpper = ''
+  let idx = 0
+
+  const groupSize = (c: string): number => {
+    switch (c) {
+      case 'H': case 'V': return 1
+      case 'M': case 'L': case 'T': return 2
+      case 'S': case 'Q': return 4
+      case 'C': return 6
+      case 'A': return 7
+      case 'Z': return 0
+      default: return 2
+    }
+  }
+
+  for (const t of tokens) {
+    if (/^[MmLlHhVvCcSsQqTtAaZz]$/.test(t)) {
+      cmd = t
+      cmdUpper = t.toUpperCase()
+      idx = 0
+      if (cmdUpper === 'Z') {
+        // Z 不产生新坐标
+      }
+      continue
+    }
+    const num = parseFloat(t)
+    const g = groupSize(cmdUpper)
+    const pos = idx % g
+    const absolute = cmd === cmdUpper
+
+    if (cmdUpper === 'H' || (cmdUpper === 'A' && pos === 5)) {
+      const x = absolute ? num : cx + num
+      if (cmdUpper === 'H') cx = x
+      else cx = x // A 的第 6 个参数是 x
+      if (cmdUpper === 'H') points.push([cx, cy])
+    } else if (cmdUpper === 'V' || (cmdUpper === 'A' && pos === 6)) {
+      const y = absolute ? num : cy + num
+      if (cmdUpper === 'V') cy = y
+      else cy = y
+      if (cmdUpper === 'V') points.push([cx, cy])
+    } else if (cmdUpper === 'A') {
+      // A 命令: rx ry x-axis-rotation large-arc sweep x y
+      if (pos === 5) {
+        cx = absolute ? num : cx + num
+      } else if (pos === 6) {
+        cy = absolute ? num : cy + num
+        points.push([cx, cy])
+      }
+    } else if (g === 2) {
+      // M L T: x y
+      if (pos === 0) {
+        cx = absolute ? num : cx + num
+      } else {
+        cy = absolute ? num : cy + num
+        points.push([cx, cy])
+      }
+    } else if (g === 4) {
+      // S Q: x1 y1 x y (或 S: x2 y2 x y)
+      if (pos === 2) {
+        cx = absolute ? num : cx + num
+      } else if (pos === 3) {
+        cy = absolute ? num : cy + num
+        points.push([cx, cy])
+      }
+    } else if (g === 6) {
+      // C: x1 y1 x2 y2 x y
+      if (pos === 4) {
+        cx = absolute ? num : cx + num
+      } else if (pos === 5) {
+        cy = absolute ? num : cy + num
+        points.push([cx, cy])
+      }
+    }
+    idx++
+  }
+  return points
+}
+
+/** 计算一组 d 字符串的并集包围盒（纯数学，不依赖 DOM） */
 function computeBBox(dStrings: string[]): { x: number; y: number; width: number; height: number } {
-  const svg = document.createElementNS(SVG_NS, 'svg') as unknown as SVGSVGElement
-  svg.setAttribute('width', '0')
-  svg.setAttribute('height', '0')
-  svg.style.position = 'absolute'
-  svg.style.left = '-9999px'
-  document.body.appendChild(svg)
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const d of dStrings) {
-    const p = document.createElementNS(SVG_NS, 'path') as SVGPathElement
-    p.setAttribute('d', d)
-    svg.appendChild(p)
-    try {
-      const bb = p.getBBox()
-      minX = Math.min(minX, bb.x)
-      minY = Math.min(minY, bb.y)
-      maxX = Math.max(maxX, bb.x + bb.width)
-      maxY = Math.max(maxY, bb.y + bb.height)
-    } catch {
-      /* noop */
+    const pts = parsePathCoords(d)
+    for (const [x, y] of pts) {
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
     }
-    p.remove()
   }
-  svg.remove()
   if (!isFinite(minX)) return { x: 0, y: 0, width: 0, height: 0 }
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
 }

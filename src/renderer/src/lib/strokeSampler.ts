@@ -2,6 +2,11 @@ import type { Shape, Stroke } from '../types'
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 
+// 每条子路径最大采样点数，防止超长路径卡死
+const MAX_POINTS_PER_SUBPATH = 2000
+// 全局最大笔画数限制
+const MAX_TOTAL_STROKES = 5000
+
 let _offSvg: SVGSVGElement | null = null
 function offSvg(): SVGSVGElement {
   if (!_offSvg) {
@@ -43,8 +48,14 @@ export function samplePathD(d: string, step: number): { x: number; y: number }[]
       path.remove()
       continue
     }
+    // 限制采样点数：如果路径太长，增大步长
+    let actualStep = step
+    let n = Math.max(1, Math.ceil(len / actualStep))
+    if (n > MAX_POINTS_PER_SUBPATH) {
+      n = MAX_POINTS_PER_SUBPATH
+      actualStep = len / n
+    }
     const pts: { x: number; y: number }[] = []
-    const n = Math.max(1, Math.ceil(len / step))
     for (let i = 0; i <= n; i++) {
       const p = path.getPointAtLength((i * len) / n)
       pts.push({ x: p.x, y: p.y })
@@ -75,6 +86,15 @@ export function sampleShape(shape: Shape, step = 2): Stroke[] {
 /** 采样所有形状为笔画列表 */
 export function sampleAllShapes(shapes: Shape[], step = 2): Stroke[] {
   const strokes: Stroke[] = []
-  for (const shape of shapes) strokes.push(...sampleShape(shape, step))
+  for (const shape of shapes) {
+    const s = sampleShape(shape, step)
+    for (const stroke of s) {
+      strokes.push(stroke)
+      if (strokes.length >= MAX_TOTAL_STROKES) {
+        console.warn(`[sampler] reached max strokes limit (${MAX_TOTAL_STROKES}), truncating`)
+        return strokes
+      }
+    }
+  }
   return strokes
 }

@@ -120,6 +120,14 @@ function resetScale() {
         <input type="number" v-model.number="store.executeOptions.strokeDelayMs" />
       </div>
       <div class="row">
+        <label>落笔前停顿(ms)</label>
+        <input type="number" v-model.number="store.executeOptions.moveSettleMs" />
+      </div>
+      <div class="row">
+        <label>按键后停顿(ms)</label>
+        <input type="number" v-model.number="store.executeOptions.pressSettleMs" />
+      </div>
+      <div class="row">
         <label>鼠标速度(px/s)</label>
         <input type="number" v-model.number="store.executeOptions.mouseSpeed" />
       </div>
