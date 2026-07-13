@@ -1,0 +1,27 @@
+{
+  "name": "autodraw",
+  "version": "0.1.0",
+  "description": "将文字、矢量图转为自动鼠标绘画脚本的桌面软件",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.1.0",
+    "opentype.js": "^1.3.4",
+    "pinia": "^2.1.7"
+  },
+  "devDependencies": {
+    "@types/opentype.js": "^1.3.4",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "electron": "^30.0.0",
+    "electron-vite": "^2.1.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vue": "^3.4.21",
+    "vue-tsc": "^2.0.0"
+  }
+}
