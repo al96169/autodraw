@@ -252,19 +252,19 @@ export function svgToPath(svgText: string): SvgPathResult {
   if (dStrings.length === 0)
     throw new Error('SVG 中未发现可绘制形状（仅支持 path/rect/circle/ellipse/line/polyline/polygon）')
 
-  if (!vbW || !vbH) {
-    // 无 viewBox/宽高：用包围盒归一化
-    const bb = computeBBox(dStrings)
+  // 始终用实际内容的包围盒归一化到 (0,0) 起点
+  // 这样即使 SVG 路径坐标超出 viewBox 范围（如负坐标或 >viewBox），
+  // 形状也能正确居中在画布内
+  const bb = computeBBox(dStrings)
+  if (isFinite(bb.x) && isFinite(bb.y) && (bb.x !== 0 || bb.y !== 0)) {
     for (let i = 0; i < dStrings.length; i++) {
       dStrings[i] = translatePath(dStrings[i], -bb.x, -bb.y)
     }
-    vbW = bb.width
-    vbH = bb.height
-  } else if (vbX !== 0 || vbY !== 0) {
-    for (let i = 0; i < dStrings.length; i++) {
-      dStrings[i] = translatePath(dStrings[i], -vbX, -vbY)
-    }
   }
+  // 使用实际内容包围盒的尺寸，而非 viewBox 尺寸
+  // 防止内容超出 viewBox 时使用错误的宽高
+  const finalW = isFinite(bb.width) && bb.width > 0 ? bb.width : vbW
+  const finalH = isFinite(bb.height) && bb.height > 0 ? bb.height : vbH
 
-  return { paths: dStrings, width: vbW, height: vbH }
+  return { paths: dStrings, width: finalW, height: finalH }
 }
