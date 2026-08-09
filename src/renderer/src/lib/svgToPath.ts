@@ -114,111 +114,56 @@ function translatePath(d: string, dx: number, dy: number): string {
   return result
 }
 
-/** 从 path d 字符串中提取所有坐标点（纯数学，不依赖 DOM） */
-function parsePathCoords(d: string): number[][] {
-  const points: number[][] = []
-  const tokens = d.match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g)
-  if (!tokens) return points
+/**
+ * 计算一组 d 字符串的并集包围盒。
+ * 使用一次性 DOM 批量操作：将所有路径放入一个 <g>，调用一次 getBBox()。
+ * 仅在 viewBox 不可用时作为 fallback 使用。
+ */
+function computeBBox(dStrings: string[]): { x: number; y: number; width: number; height: number } {
+  if (dStrings.length === 0) return { x: 0, y: 0, width: 0, height: 0 }
 
-  let cx = 0, cy = 0
-  let cmd = '', cmdUpper = ''
-  let idx = 0
+  const svg = document.createElementNS(SVG_NS, 'svg') as unknown as SVGSVGElement
+  svg.setAttribute('width', '0')
+  svg.setAttribute('height', '0')
+  svg.style.position = 'absolute'
+  svg.style.left = '-9999px'
+  svg.style.top = '0'
+  svg.style.pointerEvents = 'none'
 
-  const groupSize = (c: string): number => {
-    switch (c) {
-      case 'H': case 'V': return 1
-      case 'M': case 'L': case 'T': return 2
-      case 'S': case 'Q': return 4
-      case 'C': return 6
-      case 'A': return 7
-      case 'Z': return 0
-      default: return 2
-    }
+  const g = document.createElementNS(SVG_NS, 'g') as SVGGElement
+  for (const d of dStrings) {
+    const path = document.createElementNS(SVG_NS, 'path') as SVGPathElement
+    path.setAttribute('d', d)
+    g.appendChild(path)
+  }
+  svg.appendChild(g)
+  document.body.appendChild(svg)
+
+  let result: { x: number; y: number; width: number; height: number }
+  try {
+    const bb = g.getBBox()
+    result = { x: bb.x, y: bb.y, width: bb.width, height: bb.height }
+  } catch {
+    result = { x: 0, y: 0, width: 0, height: 0 }
   }
 
-  for (const t of tokens) {
-    if (/^[MmLlHhVvCcSsQqTtAaZz]$/.test(t)) {
-      cmd = t
-      cmdUpper = t.toUpperCase()
-      idx = 0
-      if (cmdUpper === 'Z') {
-        // Z 不产生新坐标
-      }
-      continue
-    }
-    const num = parseFloat(t)
-    const g = groupSize(cmdUpper)
-    const pos = idx % g
-    const absolute = cmd === cmdUpper
-
-    if (cmdUpper === 'H' || (cmdUpper === 'A' && pos === 5)) {
-      const x = absolute ? num : cx + num
-      if (cmdUpper === 'H') cx = x
-      else cx = x // A 的第 6 个参数是 x
-      if (cmdUpper === 'H') points.push([cx, cy])
-    } else if (cmdUpper === 'V' || (cmdUpper === 'A' && pos === 6)) {
-      const y = absolute ? num : cy + num
-      if (cmdUpper === 'V') cy = y
-      else cy = y
-      if (cmdUpper === 'V') points.push([cx, cy])
-    } else if (cmdUpper === 'A') {
-      // A 命令: rx ry x-axis-rotation large-arc sweep x y
-      if (pos === 5) {
-        cx = absolute ? num : cx + num
-      } else if (pos === 6) {
-        cy = absolute ? num : cy + num
-        points.push([cx, cy])
-      }
-    } else if (g === 2) {
-      // M L T: x y
-      if (pos === 0) {
-        cx = absolute ? num : cx + num
-      } else {
-        cy = absolute ? num : cy + num
-        points.push([cx, cy])
-      }
-    } else if (g === 4) {
-      // S Q: x1 y1 x y (或 S: x2 y2 x y)
-      if (pos === 2) {
-        cx = absolute ? num : cx + num
-      } else if (pos === 3) {
-        cy = absolute ? num : cy + num
-        points.push([cx, cy])
-      }
-    } else if (g === 6) {
-      // C: x1 y1 x2 y2 x y
-      if (pos === 4) {
-        cx = absolute ? num : cx + num
-      } else if (pos === 5) {
-        cy = absolute ? num : cy + num
-        points.push([cx, cy])
-      }
-    }
-    idx++
-  }
-  return points
+  document.body.removeChild(svg)
+  return result
 }
 
-/** 计算一组 d 字符串的并集包围盒（纯数学，不依赖 DOM） */
-function computeBBox(dStrings: string[]): { x: number; y: number; width: number; height: number } {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const d of dStrings) {
-    const pts = parsePathCoords(d)
-    for (const [x, y] of pts) {
-      minX = Math.min(minX, x)
-      minY = Math.min(minY, y)
-      maxX = Math.max(maxX, x)
-      maxY = Math.max(maxY, y)
-    }
-  }
-  if (!isFinite(minX)) return { x: 0, y: 0, width: 0, height: 0 }
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+/**
+ * 提取 path d 字符串中第一个 M/m 命令的坐标。
+ * SVG 规范中，路径的第一个 moveto 始终是绝对坐标（即使用小写 m）。
+ */
+function getFirstPoint(d: string): { x: number; y: number } | null {
+  const m = d.match(/^[Mm]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)[\s,]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/)
+  if (!m) return null
+  return { x: parseFloat(m[1]), y: parseFloat(m[2]) }
 }
 
 /**
  * 将 SVG 文本转为路径 d 字符串列表。
- * 本地坐标系归一化到 [0,width]x[0,height]。
- * 注意：v1 不处理 transform 属性。
+ * 使用 viewBox 进行坐标系归一化，过滤掉超出 viewBox 的路径。
  */
 export function svgToPath(svgText: string): SvgPathResult {
   const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml')
@@ -226,6 +171,7 @@ export function svgToPath(svgText: string): SvgPathResult {
   const svg = doc.querySelector('svg')
   if (!svg) throw new Error('未找到 <svg> 根元素')
 
+  // 解析 viewBox
   let vbW = 0
   let vbH = 0
   let vbX = 0
@@ -243,28 +189,108 @@ export function svgToPath(svgText: string): SvgPathResult {
   if (!vbW) vbW = parseFloat(svg.getAttribute('width') || '') || 0
   if (!vbH) vbH = parseFloat(svg.getAttribute('height') || '') || 0
 
+  // 解析 <style> 标签中的 CSS 规则，检测哪些 class 代表白色填充
+  const whiteFillClasses = new Set<string>()
+  const styleEls = svg.querySelectorAll('style')
+  styleEls.forEach((styleEl) => {
+    const css = styleEl.textContent || ''
+    // 匹配 .className { ... fill: #fff/#ffffff/white ... }
+    const ruleMatches = css.matchAll(/\.([\w-]+)\s*\{[^}]*fill\s*:\s*(#fff(?:fff)?|white)\s*[^}]*\}/gi)
+    for (const m of ruleMatches) {
+      whiteFillClasses.add(m[1])
+    }
+  })
+
+  function isWhiteFilled(el: Element): boolean {
+    // 检查 fill 属性
+    const fillAttr = (el.getAttribute('fill') || '').toLowerCase().trim()
+    if (['#fff', '#ffffff', 'white', 'rgb(255,255,255)', 'rgb(255, 255, 255)'].includes(fillAttr)) {
+      return true
+    }
+    // 检查 inline style 中的 fill
+    const styleAttr = el.getAttribute('style') || ''
+    if (/fill\s*:\s*(#fff(?:fff)?|white)\s*[;'"]/i.test(styleAttr)) {
+      return true
+    }
+    // 检查 class 是否匹配白色填充 CSS 规则
+    const cls = el.getAttribute('class')
+    if (cls) {
+      for (const c of cls.split(/\s+/)) {
+        if (whiteFillClasses.has(c)) return true
+      }
+    }
+    return false
+  }
+
   const dStrings: string[] = []
+  let skippedWhite = 0
   svg.querySelectorAll('path,rect,circle,ellipse,line,polyline,polygon').forEach((el) => {
+    if (isWhiteFilled(el)) {
+      skippedWhite++
+      return
+    }
     const d = elementToPathData(el)
     if (d) dStrings.push(d)
   })
+  if (skippedWhite > 0) {
+    console.log(`[svgToPath] skipped ${skippedWhite} white-filled paths`)
+  }
 
   if (dStrings.length === 0)
     throw new Error('SVG 中未发现可绘制形状（仅支持 path/rect/circle/ellipse/line/polyline/polygon）')
 
-  // 始终用实际内容的包围盒归一化到 (0,0) 起点
-  // 这样即使 SVG 路径坐标超出 viewBox 范围（如负坐标或 >viewBox），
-  // 形状也能正确居中在画布内
-  const bb = computeBBox(dStrings)
-  if (isFinite(bb.x) && isFinite(bb.y) && (bb.x !== 0 || bb.y !== 0)) {
+  let finalW: number
+  let finalH: number
+  let offsetX = 0
+  let offsetY = 0
+
+  if (vbW > 0 && vbH > 0) {
+    // 有 viewBox：使用 viewBox 尺寸，过滤超出 viewBox 的路径
+    const margin = 5 // 容差，允许轻微超出边界的路径
+    const filtered: string[] = []
+    let skippedOutside = 0
+    for (const d of dStrings) {
+      const pt = getFirstPoint(d)
+      if (pt) {
+        const outside =
+          pt.x < vbX - margin ||
+          pt.x > vbX + vbW + margin ||
+          pt.y < vbY - margin ||
+          pt.y > vbY + vbH + margin
+        if (outside) {
+          skippedOutside++
+          continue
+        }
+      }
+      filtered.push(d)
+    }
+    if (skippedOutside > 0) {
+      console.log(`[svgToPath] skipped ${skippedOutside} paths outside viewBox`)
+    }
+    dStrings.length = 0
+    dStrings.push(...filtered)
+
+    // 使用 viewBox 偏移进行平移（通常 vbX=vbY=0，无需平移）
+    offsetX = -vbX
+    offsetY = -vbY
+    finalW = vbW
+    finalH = vbH
+  } else {
+    // 无 viewBox：回退到包围盒计算
+    const bb = computeBBox(dStrings)
+    offsetX = -bb.x
+    offsetY = -bb.y
+    finalW = isFinite(bb.width) && bb.width > 0 ? bb.width : 0
+    finalH = isFinite(bb.height) && bb.height > 0 ? bb.height : 0
+  }
+
+  // 应用平移
+  if (offsetX !== 0 || offsetY !== 0) {
     for (let i = 0; i < dStrings.length; i++) {
-      dStrings[i] = translatePath(dStrings[i], -bb.x, -bb.y)
+      dStrings[i] = translatePath(dStrings[i], offsetX, offsetY)
     }
   }
-  // 使用实际内容包围盒的尺寸，而非 viewBox 尺寸
-  // 防止内容超出 viewBox 时使用错误的宽高
-  const finalW = isFinite(bb.width) && bb.width > 0 ? bb.width : vbW
-  const finalH = isFinite(bb.height) && bb.height > 0 ? bb.height : vbH
 
+  console.log(`[svgToPath] result: ${dStrings.length} paths, ${finalW}x${finalH}`)
   return { paths: dStrings, width: finalW, height: finalH }
 }
