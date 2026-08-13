@@ -6,4 +6,5 @@ dist/
 .vscode/
 *.svg
 *.ai
+!test/*.svg
 /脚本
